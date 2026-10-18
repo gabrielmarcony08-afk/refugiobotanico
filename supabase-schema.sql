@@ -9,6 +9,7 @@ create table if not exists public.products (
   alt_text text not null check (length(trim(alt_text)) between 1 and 160)
 );
 
+alter table public.products add column if not exists image_path text;
 alter table public.products enable row level security;
 
 grant usage on schema public to anon, authenticated;
@@ -33,6 +34,50 @@ create policy "Administrators can edit products"
   to authenticated
   using ((auth.jwt() -> 'app_metadata' ->> 'role') = 'admin')
   with check ((auth.jwt() -> 'app_metadata' ->> 'role') = 'admin');
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('product-images', 'product-images', true, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
+on conflict (id) do update
+set public = excluded.public,
+    file_size_limit = excluded.file_size_limit,
+    allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "Product images are visible to everyone" on storage.objects;
+create policy "Product images are visible to everyone"
+  on storage.objects for select
+  to anon, authenticated
+  using (bucket_id = 'product-images');
+
+drop policy if exists "Administrators can upload product images" on storage.objects;
+create policy "Administrators can upload product images"
+  on storage.objects for insert
+  to authenticated
+  with check (
+    bucket_id = 'product-images'
+    and (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
+  );
+
+drop policy if exists "Administrators can update product images" on storage.objects;
+create policy "Administrators can update product images"
+  on storage.objects for update
+  to authenticated
+  using (
+    bucket_id = 'product-images'
+    and (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
+  )
+  with check (
+    bucket_id = 'product-images'
+    and (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
+  );
+
+drop policy if exists "Administrators can delete product images" on storage.objects;
+create policy "Administrators can delete product images"
+  on storage.objects for delete
+  to authenticated
+  using (
+    bucket_id = 'product-images'
+    and (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
+  );
 
 insert into public.products (id, name, brand, category, tag, price, image_url, alt_text)
 values

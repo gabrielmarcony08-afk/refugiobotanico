@@ -50,12 +50,58 @@ let activeCategory = "todos";
 let toastTimer;
 let supabaseClient = null;
 let isAdmin = false;
+let adminImageObjectUrl = "";
 
 const adminDialog = document.querySelector(".admin-dialog");
 const adminBackdrop = document.querySelector(".admin-backdrop");
 const adminLogin = document.querySelector(".admin-login");
 const adminManagement = document.querySelector(".admin-management");
 const adminProductForm = document.querySelector(".admin-product-form");
+const adminImageInput = adminProductForm.elements.image;
+const adminImagePreview = document.querySelector(".admin-image-preview");
+const adminFormError = document.querySelector(".admin-form-error");
+const productImageBucket = "product-images";
+const maxProductImageBytes = 5 * 1024 * 1024;
+const productImageExtensions = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
+
+function clearAdminImagePreview() {
+  if (adminImageObjectUrl) URL.revokeObjectURL(adminImageObjectUrl);
+  adminImageObjectUrl = "";
+  adminImagePreview.querySelector("img").removeAttribute("src");
+  adminImagePreview.querySelector("p").textContent = "";
+  adminImagePreview.hidden = true;
+}
+
+function showAdminImagePreview(src, message) {
+  adminImagePreview.querySelector("img").src = src;
+  adminImagePreview.querySelector("p").textContent = message;
+  adminImagePreview.hidden = false;
+}
+
+function validateProductImage(file) {
+  if (!productImageExtensions[file.type]) {
+    return "Escolha uma imagem JPG, PNG ou WebP.";
+  }
+  if (file.size > maxProductImageBytes) {
+    return "A imagem deve ter no máximo 5 MB.";
+  }
+  return "";
+}
+
+async function uploadProductImage(file) {
+  const extension = productImageExtensions[file.type];
+  const path = `products/${crypto.randomUUID()}.${extension}`;
+  const { data, error } = await supabaseClient.storage
+    .from(productImageBucket)
+    .upload(path, file, { cacheControl: "3600", contentType: file.type, upsert: false });
+  if (error) throw error;
+  const { data: publicData } = supabaseClient.storage.from(productImageBucket).getPublicUrl(data.path);
+  return { path: data.path, url: publicData.publicUrl };
+}
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -80,7 +126,7 @@ function renderProducts() {
       <div class="product-image">
         <img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.alt)}" loading="lazy" />
         ${product.tag ? `<span class="product-tag">${escapeHtml(product.tag)}</span>` : ""}
-        <button class="quick-add" type="button" data-add="${escapeHtml(product.id)}" aria-label="Adicionar ${escapeHtml(product.name)} à sacola">+</button>
+        <button class="quick-add" type="button" data-add="${escapeHtml(product.id)}">Adicionar</button>
       </div>
       <div class="product-info">
         <p class="product-brand">${escapeHtml(product.brand)}</p>
@@ -104,7 +150,7 @@ function getWhatsAppOrderUrl() {
   const items = [...cart.values()];
   const subtotal = items.reduce((total, item) => total + item.product.price * item.quantity, 0);
   const orderLines = items.map(({ product, quantity }) =>
-    `• ${quantity}x ${product.name} — ${currency.format(product.price * quantity)}`
+    `${quantity}x ${product.name} - ${currency.format(product.price * quantity)}`
   );
   const message = [
     "Olá! Gostaria de finalizar este pedido no Refúgio Botânico:",
@@ -132,9 +178,9 @@ function renderCart() {
         <h3>${escapeHtml(product.name)}</h3>
         <p>${currency.format(product.price)}</p>
         <div class="quantity-control" aria-label="Quantidade de ${escapeHtml(product.name)}">
-          <button type="button" data-quantity="${product.id}" data-change="-1" aria-label="Diminuir quantidade">−</button>
+          <button type="button" data-quantity="${product.id}" data-change="-1" aria-label="Diminuir quantidade">Diminuir</button>
           <span>${quantity}</span>
-          <button type="button" data-quantity="${product.id}" data-change="1" aria-label="Aumentar quantidade">+</button>
+          <button type="button" data-quantity="${product.id}" data-change="1" aria-label="Aumentar quantidade">Aumentar</button>
         </div>
       </div>
       <div class="cart-row-price">
@@ -209,7 +255,7 @@ function openAdminDialog() {
 async function loadCatalog() {
   const { data, error } = await supabaseClient
     .from("products")
-    .select("id,name,brand,category,tag,price,image_url,alt_text")
+    .select("id,name,brand,category,tag,price,image_url,image_path,alt_text")
     .order("name");
   if (error) throw error;
 
@@ -221,6 +267,7 @@ async function loadCatalog() {
     tag: product.tag || "",
     price: Number(product.price),
     image: product.image_url,
+    imagePath: product.image_path,
     alt: product.alt_text,
   }));
   for (const item of cart.values()) {
@@ -247,18 +294,37 @@ function openProductEditor(productId = "") {
   adminManagement.hidden = true;
   adminProductForm.hidden = false;
   adminProductForm.reset();
+  clearAdminImagePreview();
   adminProductForm.elements.id.value = product?.id || "";
   adminProductForm.elements.name.value = product?.name || "";
   adminProductForm.elements.brand.value = product?.brand || "";
   adminProductForm.elements.category.value = product?.category || "cabelo";
   adminProductForm.elements.price.value = product?.price ?? "";
   adminProductForm.elements.tag.value = product?.tag || "";
-  adminProductForm.elements.image.value = product?.image || "";
+  adminProductForm.elements.image_path.value = product?.imagePath || "";
+  adminImageInput.required = !product;
+  if (product) showAdminImagePreview(product.image, "Foto atual. Selecione outra para substituí-la.");
   adminProductForm.elements.alt.value = product?.alt || "";
   document.querySelector(".admin-form-title").textContent = product ? "Editar produto" : "Novo produto";
-  document.querySelector(".admin-form-error").hidden = true;
+  adminFormError.hidden = true;
   adminProductForm.elements.name.focus();
 }
+
+adminImageInput.addEventListener("change", () => {
+  const file = adminImageInput.files[0];
+  if (!file) return;
+  const validationError = validateProductImage(file);
+  if (validationError) {
+    adminFormError.textContent = validationError;
+    adminFormError.hidden = false;
+    adminImageInput.value = "";
+    return;
+  }
+  adminFormError.hidden = true;
+  clearAdminImagePreview();
+  adminImageObjectUrl = URL.createObjectURL(file);
+  showAdminImagePreview(adminImageObjectUrl, "Nova foto selecionada.");
+});
 
 async function refreshAdminSession(session) {
   isAdmin = session?.user?.app_metadata?.role === "admin";
@@ -331,6 +397,8 @@ document.querySelector(".admin-product-list").addEventListener("click", (event) 
   if (editButton) openProductEditor(editButton.dataset.adminEdit);
 });
 document.querySelector("[data-cancel-product]").addEventListener("click", () => {
+  clearAdminImagePreview();
+  adminImageInput.value = "";
   adminProductForm.hidden = true;
   adminManagement.hidden = false;
 });
@@ -378,22 +446,22 @@ adminProductForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!isAdmin || !supabaseClient) return;
   const form = adminProductForm;
-  const imageUrl = form.elements.image.value.trim();
-  let imageProtocol;
-  try {
-    imageProtocol = new URL(imageUrl).protocol;
-  } catch {
-    imageProtocol = "";
+  const imageFile = adminImageInput.files[0] || null;
+  if (imageFile && validateProductImage(imageFile)) {
+    adminFormError.textContent = validateProductImage(imageFile);
+    adminFormError.hidden = false;
+    return;
   }
-  if (imageProtocol !== "https:") {
-    document.querySelector(".admin-form-error").textContent = "A imagem deve usar uma URL segura HTTPS.";
-    document.querySelector(".admin-form-error").hidden = false;
+  if (!imageFile && !form.elements.image_path.value) {
+    adminFormError.textContent = "Escolha uma foto para o produto.";
+    adminFormError.hidden = false;
     return;
   }
 
   const productId = form.elements.id.value || crypto.randomUUID();
   const button = form.querySelector('button[type="submit"]');
-  const errorMessage = document.querySelector(".admin-form-error");
+  const previousImagePath = form.elements.image_path.value;
+  let uploadedImage = null;
   const product = {
     id: productId,
     name: form.elements.name.value.trim(),
@@ -401,23 +469,55 @@ adminProductForm.addEventListener("submit", async (event) => {
     category: form.elements.category.value,
     price: Number(form.elements.price.value),
     tag: form.elements.tag.value.trim() || null,
-    image_url: imageUrl,
+    image_url: "",
+    image_path: previousImagePath || null,
     alt_text: form.elements.alt.value.trim(),
   };
   button.disabled = true;
-  errorMessage.hidden = true;
+  adminFormError.hidden = true;
+  let productSaved = false;
   try {
+    if (imageFile) {
+      uploadedImage = await uploadProductImage(imageFile);
+      product.image_url = uploadedImage.url;
+      product.image_path = uploadedImage.path;
+    } else {
+      product.image_url = products.find((item) => item.id === productId)?.image || "";
+    }
     const { error } = await supabaseClient.from("products").upsert(product);
     if (error) throw error;
+    productSaved = true;
+    let cleanupWarning = false;
+    if (previousImagePath && uploadedImage) {
+      const { error: deleteError } = await supabaseClient.storage
+        .from(productImageBucket)
+        .remove([previousImagePath]);
+      if (deleteError) {
+        cleanupWarning = true;
+        console.error("Produto salvo, mas não foi possível remover a imagem anterior.", deleteError);
+      }
+    }
     await loadCatalog();
     renderAdminProductList();
     adminProductForm.hidden = true;
     adminManagement.hidden = false;
-    showToast("Produto salvo no catálogo.");
+    showToast(cleanupWarning ? "Produto salvo, mas a foto anterior não foi removida." : "Produto salvo no catálogo.");
   } catch (error) {
+    if (uploadedImage && !productSaved) {
+      try {
+        const { error: cleanupError } = await supabaseClient.storage
+          .from(productImageBucket)
+          .remove([uploadedImage.path]);
+        if (cleanupError) console.error("Não foi possível remover a imagem enviada após a falha ao salvar.", cleanupError);
+      } catch (cleanupError) {
+        console.error("Não foi possível remover a imagem enviada após a falha ao salvar.", cleanupError);
+      }
+    }
     console.error("Falha ao salvar o produto.", error);
-    errorMessage.textContent = "Não foi possível salvar. Verifique os campos e as permissões do catálogo.";
-    errorMessage.hidden = false;
+    adminFormError.textContent = productSaved
+      ? "Produto salvo, mas o catálogo não pôde ser atualizado. Feche e abra o painel novamente."
+      : "Não foi possível salvar. Verifique sua conexão e as permissões do catálogo.";
+    adminFormError.hidden = false;
   } finally {
     button.disabled = false;
   }
